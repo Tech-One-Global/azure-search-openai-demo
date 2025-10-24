@@ -3,6 +3,7 @@ import logging
 import os
 from typing import Optional
 
+from azure.core.exceptions import HttpResponseError
 from azure.search.documents.indexes.models import (
     AIServicesVisionParameters,
     AIServicesVisionVectorizer,
@@ -339,6 +340,35 @@ class SearchManager:
                         ),
                     )
                     await search_index_client.create_or_update_index(existing_index)
+
+                if self.use_acls:
+                    acl_fields_added = False
+                    if not any(field.name == "oids" for field in existing_index.fields):
+                        existing_index.fields.append(
+                            SimpleField(
+                                name="oids",
+                                type=SearchFieldDataType.Collection(SearchFieldDataType.String),
+                                filterable=True,
+                            )
+                        )
+                        acl_fields_added = True
+                    if not any(field.name == "groups" for field in existing_index.fields):
+                        existing_index.fields.append(
+                            SimpleField(
+                                name="groups",
+                                type=SearchFieldDataType.Collection(SearchFieldDataType.String),
+                                filterable=True,
+                            )
+                        )
+                        acl_fields_added = True
+                    if acl_fields_added:
+                        logger.info("Adding ACL fields to index %s", self.search_info.index_name)
+                        try:
+                            await search_index_client.create_or_update_index(existing_index)
+                        except HttpResponseError as error:
+                            logger.warning(
+                                "Unable to add ACL fields to index '%s': %s", self.search_info.index_name, str(error)
+                            )
 
                 if embedding_field and not any(
                     field.name == self.field_name_embedding for field in existing_index.fields

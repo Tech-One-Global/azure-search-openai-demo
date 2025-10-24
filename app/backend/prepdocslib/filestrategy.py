@@ -1,6 +1,7 @@
 import logging
 from typing import Optional
 
+from azure.core.exceptions import HttpResponseError
 from azure.core.credentials import AzureKeyCredential
 
 from .blobmanager import AdlsBlobManager, BaseBlobManager, BlobManager
@@ -153,6 +154,7 @@ class UploadUserFileStrategy:
         self.image_embeddings = image_embeddings
         self.search_info = search_info
         self.blob_manager = blob_manager
+        self.acls_enabled = True
         self.search_manager = SearchManager(
             search_info=self.search_info,
             search_analyzer_name=None,
@@ -165,6 +167,8 @@ class UploadUserFileStrategy:
         self.search_field_name_embedding = search_field_name_embedding
 
     async def add_file(self, file: File, user_oid: str):
+        if not self.acls_enabled:
+            file.acls = {}
         sections = await parse_file(
             file, self.file_processors, None, self.blob_manager, self.image_embeddings, user_oid=user_oid
         )
@@ -176,3 +180,32 @@ class UploadUserFileStrategy:
             logging.warning("Filename is required to remove a file")
             return
         await self.search_manager.remove_content(filename, oid)
+
+    async def ensure_index(self):
+        """Materialize or update the backing search index before ingest operations."""
+        try:
+            await self.search_manager.create_index()
+        except HttpResponseError as error:
+            if getattr(error, "status_code", None) == 403:
+                logger.warning(
+                    "Unable to update search index '%s' ACL fields due to insufficient permissions; proceeding without per-user ACLs",
+                    self.search_info.index_name,
+                )
+                self.acls_enabled = False
+                self.search_manager.use_acls = False
+                return
+            raise
+        supports_acls = await self._index_supports_acls()
+        self.acls_enabled = supports_acls
+        self.search_manager.use_acls = supports_acls
+
+    async def _index_supports_acls(self) -> bool:
+        try:
+            async with self.search_info.create_search_index_client() as search_index_client:
+                index = await search_index_client.get_index(self.search_info.index_name)
+                return any(field.name == "oids" for field in index.fields)
+        except HttpResponseError as error:
+            logger.warning(
+                "Unable to verify ACL support for index '%s': %s", self.search_info.index_name, str(error)
+            )
+        return False

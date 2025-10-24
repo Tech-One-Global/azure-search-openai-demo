@@ -92,7 +92,13 @@ export async function uploadFileApi(request: FormData, idToken: string): Promise
     });
 
     if (!response.ok) {
-        throw new Error(`Uploading files failed: ${response.statusText}`);
+        // Try to get the error message from the response body
+        try {
+            const errorData = await response.json();
+            throw new Error(errorData.message || `Uploading files failed: ${response.statusText}`);
+        } catch (parseError) {
+            throw new Error(`Uploading files failed: ${response.statusText}`);
+        }
     }
 
     const dataResponse: SimpleAPIResponse = await response.json();

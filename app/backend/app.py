@@ -82,6 +82,7 @@ from config import (
     CONFIG_STREAMING_ENABLED,
     CONFIG_USER_BLOB_MANAGER,
     CONFIG_USER_UPLOAD_ENABLED,
+    CONFIG_USER_UPLOAD_ACLS_ENABLED,
     CONFIG_VECTOR_SEARCH_ENABLED,
 )
 from core.authentication import AuthenticationHelper
@@ -357,17 +358,55 @@ async def upload(auth_claims: dict[str, Any]):
     if "file" not in request_files:
         return jsonify({"message": "No file part in the request", "status": "failed"}), 400
 
+    filename = None
     try:
         user_oid = auth_claims["oid"]
+        import io
+
         file = request_files.getlist("file")[0]
+        filename = file.filename
+        
+        # Stage 1: Upload to storage
+        current_app.logger.info(f"Stage 1/3: Uploading file '{filename}' to storage for user {user_oid}")
         adls_manager: AdlsBlobManager = current_app.config[CONFIG_USER_BLOB_MANAGER]
-        file_url = await adls_manager.upload_blob(file, file.filename, user_oid)
+        file_url = await adls_manager.upload_blob(file, filename, user_oid)
+        current_app.logger.info(f"Stage 1/3: File uploaded to storage: {file_url}")
+        
+        # Stage 2 & 3: Parse and index using UploadUserFileStrategy
+        # This uses the same logic as prepdocs.sh: parsing, chunking, embedding, indexing
+        current_app.logger.info(f"Stage 2/3: Parsing and processing file '{filename}'")
+        if current_app.config.get(CONFIG_USER_UPLOAD_ACLS_ENABLED, False):
+            acls = {"oids": [user_oid]}
+        else:
+            acls = {}
+        # Reset the stream and create an in-memory file-like object so downstream parsers
+        # receive a simple binary stream instead of the werkzeug FileStorage wrapper.
+        try:
+            file.stream.seek(0)
+        except Exception:  # pragma: no cover - seek may fail for some streams
+            current_app.logger.warning("Unable to seek to beginning of uploaded file stream; continuing anyway")
+        file_bytes = file.stream.read()
+        file_like = io.BytesIO(file_bytes)
+        file_like.seek(0)
+        setattr(file_like, "filename", filename)
+        setattr(file_like, "name", filename)
+
         ingester: UploadUserFileStrategy = current_app.config[CONFIG_INGESTER]
-        await ingester.add_file(File(content=file, url=file_url, acls={"oids": [user_oid]}), user_oid=user_oid)
-        return jsonify({"message": "File uploaded successfully"}), 200
+        await ingester.add_file(File(content=file_like, url=file_url, acls=acls), user_oid=user_oid)
+        current_app.logger.info(f"Stage 3/3: File '{filename}' indexed successfully")
+        
+        return jsonify({
+            "message": "File uploaded and indexed successfully", 
+            "filename": filename,
+            "status": "success"
+        }), 200
     except Exception as error:
-        current_app.logger.error("Error uploading file: %s", error)
-        return jsonify({"message": "Error uploading file, check server logs for details.", "status": "failed"}), 500
+        current_app.logger.error(f"Error uploading file '{filename}': {type(error).__name__}: {str(error)}", exc_info=True)
+        return jsonify({
+            "message": f"Error processing file: {type(error).__name__}: {str(error)}", 
+            "filename": filename,
+            "status": "failed"
+        }), 500
 
 
 @bp.post("/delete_uploaded")
@@ -572,6 +611,8 @@ async def setup_clients():
     )
 
     user_blob_manager = None
+    current_app.config[CONFIG_USER_UPLOAD_ACLS_ENABLED] = False
+
     if USE_USER_UPLOAD:
         current_app.logger.info("USE_USER_UPLOAD is true, setting up user upload feature")
         if not AZURE_USERSTORAGE_ACCOUNT or not AZURE_USERSTORAGE_CONTAINER:
@@ -628,7 +669,9 @@ async def setup_clients():
             search_field_name_embedding=AZURE_SEARCH_FIELD_NAME_EMBEDDING,
             blob_manager=user_blob_manager,
         )
+        await ingester.ensure_index()
         current_app.config[CONFIG_INGESTER] = ingester
+        current_app.config[CONFIG_USER_UPLOAD_ACLS_ENABLED] = ingester.acls_enabled
 
     image_embeddings_client = None
     if USE_MULTIMODAL:

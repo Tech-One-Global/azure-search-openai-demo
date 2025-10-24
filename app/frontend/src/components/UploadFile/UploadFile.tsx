@@ -96,9 +96,11 @@ export const UploadFile: React.FC<Props> = ({ className, disabled }: Props) => {
             setUploadedFileError(undefined);
             listUploadedFiles(idToken);
         } catch (error) {
-            console.error(error);
+            console.error("Upload error:", error);
             setIsUploading(false);
-            setUploadedFileError(t("upload.uploadedFileError"));
+            // Show the actual error message from the server if available
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            setUploadedFileError(errorMessage || t("upload.uploadedFileError"));
         }
     };
 
@@ -131,9 +133,14 @@ export const UploadFile: React.FC<Props> = ({ className, disabled }: Props) => {
                         </form>
 
                         {/* Show a loading message while files are being uploaded */}
-                        {isUploading && <Text>{t("upload.uploadingFiles")}</Text>}
-                        {!isUploading && uploadedFileError && <Text>{uploadedFileError}</Text>}
-                        {!isUploading && uploadedFile && <Text>{uploadedFile.message}</Text>}
+                        {isUploading && (
+                            <div>
+                                <Text>{t("upload.uploadingFiles")}</Text>
+                                <Text style={{ fontSize: "12px", color: "#666" }}>Processing: uploading → parsing → indexing...</Text>
+                            </div>
+                        )}
+                        {!isUploading && uploadedFileError && <Text style={{ color: "red" }}>{uploadedFileError}</Text>}
+                        {!isUploading && uploadedFile && <Text style={{ color: "green" }}>{uploadedFile.message}</Text>}
 
                         {/* Display the list of already uploaded */}
                         <h3>{t("upload.uploadedFilesLabel")}</h3>
